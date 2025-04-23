@@ -374,14 +374,7 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 	if len(s) < l.tracelog.numMessages {
 		s = append(s, newEntry)
 	} else {
-		// Find the oldest entry and replace it
-		oldestIdx := 0
-		for i := 1; i < len(s); i++ {
-			if s[i].time.Before(s[oldestIdx].time) {
-				oldestIdx = i
-			}
-		}
-		s[oldestIdx] = newEntry
+		s = append(s[1:], newEntry)
 	}
 
 	l.tracelog.logs[group] = g
