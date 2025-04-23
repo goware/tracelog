@@ -57,7 +57,7 @@ type tracelog struct {
 	numGroups, numSpans, numMessages int
 	enabled                          bool
 	groupTS                          map[string]time.Time
-	spanTS                           map[string]time.Time
+	spanTS                           map[string]map[string]time.Time
 	mu                               sync.RWMutex
 }
 
@@ -83,8 +83,14 @@ func NewTracelogWithSizes(numGroups, numSpans, numMessages int) Tracelog {
 		numMessages: numMessages,
 		enabled:     true,
 		groupTS:     make(map[string]time.Time),
-		spanTS:      make(map[string]time.Time),
+		spanTS:      make(map[string]map[string]time.Time),
 	}
+}
+
+func Noop() Tracelog {
+	tracelog := NewTracelogWithSizes(1, 1, 1)
+	tracelog.Disable()
+	return tracelog
 }
 
 func (t *tracelog) Trace(group, span string) Logger {
@@ -138,8 +144,8 @@ func (t *tracelog) Logs(group string) [][]LogEntry {
 	}
 
 	sort.Slice(spans, func(i, j int) bool {
-		timeI := t.spanTS[spans[i]]
-		timeJ := t.spanTS[spans[j]]
+		timeI := t.spanTS[group][spans[i]]
+		timeJ := t.spanTS[group][spans[j]]
 		return timeI.After(timeJ) // most recent first
 	})
 
@@ -150,6 +156,9 @@ func (t *tracelog) Logs(group string) [][]LogEntry {
 		for _, entry := range entries {
 			outSpan = append(outSpan, entry)
 		}
+		sort.Slice(outSpan, func(i, j int) bool {
+			return outSpan[i].Time().After(outSpan[j].Time())
+		})
 		out = append(out, outSpan)
 	}
 
@@ -162,17 +171,43 @@ func (t *tracelog) ToMap(timezone string, withExactTime bool, groupFilter, spanF
 
 	m := make(map[string]map[string][]string)
 
-	for group, spans := range t.logs {
+	groups := make([]string, 0, len(t.logs))
+	for group := range t.logs {
 		if groupFilter != "" && !strings.HasPrefix(group, groupFilter) {
 			continue
 		}
+		groups = append(groups, group)
+	}
 
-		groupMap := make(map[string][]string)
-		for span, entries := range spans {
+	sort.Slice(groups, func(i, j int) bool {
+		timeI := t.groupTS[groups[i]]
+		timeJ := t.groupTS[groups[j]]
+		return timeI.After(timeJ) // most recent first
+	})
+
+	for _, group := range groups {
+		spans := t.logs[group]
+
+		spanNames := make([]string, 0, len(spans))
+		for span := range spans {
 			if spanFilter != "" && !strings.HasPrefix(span, spanFilter) {
 				continue
 			}
+			spanNames = append(spanNames, span)
+		}
 
+		sort.Slice(spanNames, func(i, j int) bool {
+			timeI := t.spanTS[group][spanNames[i]]
+			timeJ := t.spanTS[group][spanNames[j]]
+			return timeI.After(timeJ) // most recent first
+		})
+
+		groupMap := make(map[string][]string)
+		for _, span := range spanNames {
+			entries := spans[span]
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].time.After(entries[j].time)
+			})
 			for _, entry := range entries {
 				groupMap[span] = append(groupMap[span], entry.FormattedMessage(timezone, withExactTime))
 			}
@@ -254,25 +289,58 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 	l.tracelog.mu.Lock()
 	defer l.tracelog.mu.Unlock()
 
-	// TODO: limit the number of groups ..
-	// which one do we bump..? we need a timestamp per group..
-	// and timestamp per span ..
+	timeNow := time.Now().UTC()
 
 	// update timestamps
-	l.tracelog.groupTS[group] = time.Now().UTC()
-	l.tracelog.spanTS[span] = time.Now().UTC()
+	l.tracelog.groupTS[group] = timeNow
+	if l.tracelog.spanTS[group] == nil {
+		l.tracelog.spanTS[group] = make(map[string]time.Time)
+	}
+	l.tracelog.spanTS[group][span] = timeNow
 
-	// add log entry
+	// add group entry if it doesn't exist, or purge oldest group if we've hit the limit
 	g := l.tracelog.logs[group]
 	if g == nil {
 		g = make(map[string][]logEntry)
+		l.tracelog.logs[group] = g
+	} else if len(l.tracelog.groupTS) > l.tracelog.numGroups {
+		// find and remove the group with the oldest timestamp
+		var oldestGroup string
+		var oldestTime time.Time
+		first := true
+		for grp, ts := range l.tracelog.groupTS {
+			if first || ts.Before(oldestTime) {
+				oldestGroup = grp
+				oldestTime = ts
+				first = false
+			}
+		}
+		delete(l.tracelog.logs, oldestGroup)
+		delete(l.tracelog.groupTS, oldestGroup)
+		delete(l.tracelog.spanTS, oldestGroup)
 	}
 
+	// add span entry if it doesn't exist, or purge oldest span if we've hit the limit
 	s := g[span]
 	if s == nil {
 		s = make([]logEntry, 0, l.tracelog.numMessages)
+	} else if len(l.tracelog.spanTS[group]) > l.tracelog.numSpans {
+		// find and remove the span with the oldest timestamp
+		var oldestSpan string
+		var oldestTime time.Time
+		first := true
+		for span, ts := range l.tracelog.spanTS[group] {
+			if first || ts.Before(oldestTime) {
+				oldestSpan = span
+				oldestTime = ts
+				first = false
+			}
+		}
+		delete(l.tracelog.logs[group], oldestSpan)
+		delete(l.tracelog.spanTS[group], oldestSpan)
 	}
 
+	// add log entry
 	msg := fmt.Sprintf(message, v...)
 	if len(msg) == 0 {
 		return
@@ -282,42 +350,42 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 		msg = msg[:1000]
 	}
 
-	// First check if the message is already in the log, and if so, increment the count
+	// first check if the message is already in the log, and if so, increment the count
 	// and update the time
 	for i, entry := range s {
 		if entry.message == msg && entry.level == level {
 			entry.count++
-			entry.time = time.Now().UTC()
+			entry.time = timeNow
 			s[i] = entry
 			l.tracelog.logs[group][span] = s
-			sort.Slice(s, func(i, j int) bool {
-				return s[i].time.After(s[j].time)
-			})
 			return
 		}
 	}
 
-	// Add the new entry
-	newLen := len(s) + 1
-	if newLen > l.tracelog.numMessages {
-		newLen = l.tracelog.numMessages
-	}
-	newS := make([]logEntry, newLen)
+	// add entry with capacity
 	newEntry := logEntry{
 		group:   l.group,
 		span:    l.span,
 		message: msg,
 		level:   level,
-		time:    time.Now().UTC(),
+		time:    timeNow,
 		count:   1,
 	}
-	newS[0] = newEntry
-	if len(s) > 0 {
-		copy(newS[1:], s[:newLen-1])
+	if len(s) < l.tracelog.numMessages {
+		s = append(s, newEntry)
+	} else {
+		// Find the oldest entry and replace it
+		oldestIdx := 0
+		for i := 1; i < len(s); i++ {
+			if s[i].time.Before(s[oldestIdx].time) {
+				oldestIdx = i
+			}
+		}
+		s[oldestIdx] = newEntry
 	}
 
 	l.tracelog.logs[group] = g
-	l.tracelog.logs[group][span] = newS
+	l.tracelog.logs[group][span] = s
 }
 
 type logEntry struct {
