@@ -43,7 +43,9 @@ func main() {
 		trace.Info("getY")
 		trace.Info("setX")
 		trace.Info("setY")
+		time.Sleep(500 * time.Millisecond)
 		trace.Warn("oops")
+		time.Sleep(500 * time.Millisecond)
 		trace.Error("boom")
 
 		time.Sleep(1000 * time.Millisecond)

@@ -156,6 +156,9 @@ func (t *tracelog) Logs(group string) [][]LogEntry {
 		for _, entry := range entries {
 			outSpan = append(outSpan, entry)
 		}
+		sort.Slice(outSpan, func(i, j int) bool {
+			return outSpan[i].Time().After(outSpan[j].Time())
+		})
 		out = append(out, outSpan)
 	}
 
@@ -202,6 +205,9 @@ func (t *tracelog) ToMap(timezone string, withExactTime bool, groupFilter, spanF
 		groupMap := make(map[string][]string)
 		for _, span := range spanNames {
 			entries := spans[span]
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].time.After(entries[j].time)
+			})
 			for _, entry := range entries {
 				groupMap[span] = append(groupMap[span], entry.FormattedMessage(timezone, withExactTime))
 			}
@@ -283,12 +289,14 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 	l.tracelog.mu.Lock()
 	defer l.tracelog.mu.Unlock()
 
+	timeNow := time.Now().UTC()
+
 	// update timestamps
-	l.tracelog.groupTS[group] = time.Now().UTC()
+	l.tracelog.groupTS[group] = timeNow
 	if l.tracelog.spanTS[group] == nil {
 		l.tracelog.spanTS[group] = make(map[string]time.Time)
 	}
-	l.tracelog.spanTS[group][span] = time.Now().UTC()
+	l.tracelog.spanTS[group][span] = timeNow
 
 	// add group entry if it doesn't exist, or purge oldest group if we've hit the limit
 	g := l.tracelog.logs[group]
@@ -347,12 +355,9 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 	for i, entry := range s {
 		if entry.message == msg && entry.level == level {
 			entry.count++
-			entry.time = time.Now().UTC()
+			entry.time = timeNow
 			s[i] = entry
 			l.tracelog.logs[group][span] = s
-			sort.Slice(s, func(i, j int) bool {
-				return s[i].time.After(s[j].time)
-			})
 			return
 		}
 	}
@@ -363,16 +368,20 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 		span:    l.span,
 		message: msg,
 		level:   level,
-		time:    time.Now().UTC(),
+		time:    timeNow,
 		count:   1,
 	}
 	if len(s) < l.tracelog.numMessages {
-		s = append(s, logEntry{})
-		copy(s[1:], s[:len(s)-1])
-		s[0] = newEntry
+		s = append(s, newEntry)
 	} else {
-		copy(s[1:], s[:len(s)-1])
-		s[0] = newEntry
+		// Find the oldest entry and replace it
+		oldestIdx := 0
+		for i := 1; i < len(s); i++ {
+			if s[i].time.Before(s[oldestIdx].time) {
+				oldestIdx = i
+			}
+		}
+		s[oldestIdx] = newEntry
 	}
 
 	l.tracelog.logs[group] = g
