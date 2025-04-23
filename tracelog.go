@@ -3,6 +3,7 @@ package tracelog
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -126,14 +127,32 @@ func (t *tracelog) ListSpans(group string) []string {
 func (t *tracelog) Logs(group string) [][]LogEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	out := make([][]LogEntry, 0, len(t.logs[group]))
-	for _, span := range t.logs[group] {
-		outSpan := make([]LogEntry, 0, len(span))
-		for _, entry := range span {
+
+	if _, ok := t.logs[group]; !ok {
+		return [][]LogEntry{}
+	}
+
+	spans := make([]string, 0, len(t.logs[group]))
+	for span := range t.logs[group] {
+		spans = append(spans, span)
+	}
+
+	sort.Slice(spans, func(i, j int) bool {
+		timeI := t.spanTS[spans[i]]
+		timeJ := t.spanTS[spans[j]]
+		return timeI.After(timeJ) // most recent first
+	})
+
+	out := make([][]LogEntry, 0, len(spans))
+	for _, span := range spans {
+		entries := t.logs[group][span]
+		outSpan := make([]LogEntry, 0, len(entries))
+		for _, entry := range entries {
 			outSpan = append(outSpan, entry)
 		}
 		out = append(out, outSpan)
 	}
+
 	return out
 }
 
@@ -141,9 +160,28 @@ func (t *tracelog) ToMap(timezone string, withExactTime bool, groupFilter, spanF
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	// TODO
+	m := make(map[string]map[string][]string)
 
-	return nil
+	for group, spans := range t.logs {
+		if groupFilter != "" && !strings.HasPrefix(group, groupFilter) {
+			continue
+		}
+
+		groupMap := make(map[string][]string)
+		for span, entries := range spans {
+			if spanFilter != "" && !strings.HasPrefix(span, spanFilter) {
+				continue
+			}
+
+			for _, entry := range entries {
+				groupMap[span] = append(groupMap[span], entry.FormattedMessage(timezone, withExactTime))
+			}
+		}
+
+		m[group] = groupMap
+	}
+
+	return m
 }
 
 func (t *tracelog) Enable() {
