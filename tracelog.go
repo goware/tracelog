@@ -162,17 +162,40 @@ func (t *tracelog) ToMap(timezone string, withExactTime bool, groupFilter, spanF
 
 	m := make(map[string]map[string][]string)
 
-	for group, spans := range t.logs {
+	groups := make([]string, 0, len(t.logs))
+	for group := range t.logs {
 		if groupFilter != "" && !strings.HasPrefix(group, groupFilter) {
 			continue
 		}
+		groups = append(groups, group)
+	}
 
-		groupMap := make(map[string][]string)
-		for span, entries := range spans {
+	sort.Slice(groups, func(i, j int) bool {
+		timeI := t.groupTS[groups[i]]
+		timeJ := t.groupTS[groups[j]]
+		return timeI.After(timeJ) // most recent first
+	})
+
+	for _, group := range groups {
+		spans := t.logs[group]
+
+		spanNames := make([]string, 0, len(spans))
+		for span := range spans {
 			if spanFilter != "" && !strings.HasPrefix(span, spanFilter) {
 				continue
 			}
+			spanNames = append(spanNames, span)
+		}
 
+		sort.Slice(spanNames, func(i, j int) bool {
+			timeI := t.spanTS[spanNames[i]]
+			timeJ := t.spanTS[spanNames[j]]
+			return timeI.After(timeJ) // most recent first
+		})
+
+		groupMap := make(map[string][]string)
+		for _, span := range spanNames {
+			entries := spans[span]
 			for _, entry := range entries {
 				groupMap[span] = append(groupMap[span], entry.FormattedMessage(timezone, withExactTime))
 			}
