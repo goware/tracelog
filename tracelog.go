@@ -57,7 +57,7 @@ type tracelog struct {
 	numGroups, numSpans, numMessages int
 	enabled                          bool
 	groupTS                          map[string]time.Time
-	spanTS                           map[string]time.Time
+	spanTS                           map[string]map[string]time.Time
 	mu                               sync.RWMutex
 }
 
@@ -83,8 +83,14 @@ func NewTracelogWithSizes(numGroups, numSpans, numMessages int) Tracelog {
 		numMessages: numMessages,
 		enabled:     true,
 		groupTS:     make(map[string]time.Time),
-		spanTS:      make(map[string]time.Time),
+		spanTS:      make(map[string]map[string]time.Time),
 	}
+}
+
+func Noop() Tracelog {
+	tracelog := NewTracelogWithSizes(1, 1, 1)
+	tracelog.Disable()
+	return tracelog
 }
 
 func (t *tracelog) Trace(group, span string) Logger {
@@ -138,8 +144,8 @@ func (t *tracelog) Logs(group string) [][]LogEntry {
 	}
 
 	sort.Slice(spans, func(i, j int) bool {
-		timeI := t.spanTS[spans[i]]
-		timeJ := t.spanTS[spans[j]]
+		timeI := t.spanTS[group][spans[i]]
+		timeJ := t.spanTS[group][spans[j]]
 		return timeI.After(timeJ) // most recent first
 	})
 
@@ -188,8 +194,8 @@ func (t *tracelog) ToMap(timezone string, withExactTime bool, groupFilter, spanF
 		}
 
 		sort.Slice(spanNames, func(i, j int) bool {
-			timeI := t.spanTS[spanNames[i]]
-			timeJ := t.spanTS[spanNames[j]]
+			timeI := t.spanTS[group][spanNames[i]]
+			timeJ := t.spanTS[group][spanNames[j]]
 			return timeI.After(timeJ) // most recent first
 		})
 
@@ -277,25 +283,56 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 	l.tracelog.mu.Lock()
 	defer l.tracelog.mu.Unlock()
 
-	// TODO: limit the number of groups ..
-	// which one do we bump..? we need a timestamp per group..
-	// and timestamp per span ..
-
 	// update timestamps
 	l.tracelog.groupTS[group] = time.Now().UTC()
-	l.tracelog.spanTS[span] = time.Now().UTC()
+	if l.tracelog.spanTS[group] == nil {
+		l.tracelog.spanTS[group] = make(map[string]time.Time)
+	}
+	l.tracelog.spanTS[group][span] = time.Now().UTC()
 
-	// add log entry
+	// add group entry if it doesn't exist, or purge oldest group if we've hit the limit
 	g := l.tracelog.logs[group]
 	if g == nil {
 		g = make(map[string][]logEntry)
+		l.tracelog.logs[group] = g
+	} else if len(l.tracelog.groupTS) > l.tracelog.numGroups {
+		// find and remove the group with the oldest timestamp
+		var oldestGroup string
+		var oldestTime time.Time
+		first := true
+		for grp, ts := range l.tracelog.groupTS {
+			if first || ts.Before(oldestTime) {
+				oldestGroup = grp
+				oldestTime = ts
+				first = false
+			}
+		}
+		delete(l.tracelog.logs, oldestGroup)
+		delete(l.tracelog.groupTS, oldestGroup)
+		delete(l.tracelog.spanTS, oldestGroup)
 	}
 
+	// add span entry if it doesn't exist, or purge oldest span if we've hit the limit
 	s := g[span]
 	if s == nil {
 		s = make([]logEntry, 0, l.tracelog.numMessages)
+	} else if len(l.tracelog.spanTS[group]) > l.tracelog.numSpans {
+		// find and remove the span with the oldest timestamp
+		var oldestSpan string
+		var oldestTime time.Time
+		first := true
+		for span, ts := range l.tracelog.spanTS[group] {
+			if first || ts.Before(oldestTime) {
+				oldestSpan = span
+				oldestTime = ts
+				first = false
+			}
+		}
+		delete(l.tracelog.logs[group], oldestSpan)
+		delete(l.tracelog.spanTS[group], oldestSpan)
 	}
 
+	// add log entry
 	msg := fmt.Sprintf(message, v...)
 	if len(msg) == 0 {
 		return
@@ -305,7 +342,7 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 		msg = msg[:1000]
 	}
 
-	// First check if the message is already in the log, and if so, increment the count
+	// first check if the message is already in the log, and if so, increment the count
 	// and update the time
 	for i, entry := range s {
 		if entry.message == msg && entry.level == level {
@@ -320,12 +357,7 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 		}
 	}
 
-	// Add the new entry
-	newLen := len(s) + 1
-	if newLen > l.tracelog.numMessages {
-		newLen = l.tracelog.numMessages
-	}
-	newS := make([]logEntry, newLen)
+	// add entry with capacity
 	newEntry := logEntry{
 		group:   l.group,
 		span:    l.span,
@@ -334,13 +366,17 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 		time:    time.Now().UTC(),
 		count:   1,
 	}
-	newS[0] = newEntry
-	if len(s) > 0 {
-		copy(newS[1:], s[:newLen-1])
+	if len(s) < l.tracelog.numMessages {
+		s = append(s, logEntry{})
+		copy(s[1:], s[:len(s)-1])
+		s[0] = newEntry
+	} else {
+		copy(s[1:], s[:len(s)-1])
+		s[0] = newEntry
 	}
 
 	l.tracelog.logs[group] = g
-	l.tracelog.logs[group][span] = newS
+	l.tracelog.logs[group][span] = s
 }
 
 type logEntry struct {
