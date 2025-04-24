@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/goware/tracer"
@@ -88,4 +89,7 @@ func main() {
 	// spew.Dump(tracer.Logs("jobqueue"))
 	// fmt.Println("\n----\n")
 	// spew.Dump(tracer.ToMap("EST", false, "", ""))
+
+	_, jsonOut := tracer.ToMap("EST", false, "", "")
+	fmt.Println(string(jsonOut))
 }

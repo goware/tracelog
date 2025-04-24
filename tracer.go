@@ -1,6 +1,8 @@
 package tracer
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -22,7 +24,7 @@ type Tracer interface {
 	ListSpans(group string) []string
 
 	Logs(group string) [][]LogEntry
-	ToMap(timezone string, withExactTime bool, groupFilter, spanFilter string) map[string]map[string][]string
+	ToMap(timezone string, withExactTime bool, groupFilter, spanFilter string) (map[string]map[string][]string, []byte)
 
 	Enable()  // by default tracer is enabled
 	Disable() // disable all logging, turning each call into a noop
@@ -165,11 +167,15 @@ func (t *tracer) Logs(group string) [][]LogEntry {
 	return out
 }
 
-func (t *tracer) ToMap(timezone string, withExactTime bool, groupFilter, spanFilter string) map[string]map[string][]string {
+func (t *tracer) ToMap(timezone string, withExactTime bool, groupFilter, spanFilter string) (map[string]map[string][]string, []byte) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	m := make(map[string]map[string][]string)
+	var m = make(map[string]map[string][]string)
+	var jsonBuf bytes.Buffer
+
+	// custom json output to ensure desired ordering of map keys
+	jsonBuf.WriteString(`{`)
 
 	groups := make([]string, 0, len(t.logs))
 	for group := range t.logs {
@@ -185,7 +191,13 @@ func (t *tracer) ToMap(timezone string, withExactTime bool, groupFilter, spanFil
 		return timeI.After(timeJ) // most recent first
 	})
 
-	for _, group := range groups {
+	for i, group := range groups {
+		if i > 0 {
+			jsonBuf.WriteString(`,`)
+		}
+		v, _ := json.Marshal(group)
+		jsonBuf.WriteString(fmt.Sprintf(`%s:{`, v))
+
 		spans := t.logs[group]
 
 		spanNames := make([]string, 0, len(spans))
@@ -203,7 +215,13 @@ func (t *tracer) ToMap(timezone string, withExactTime bool, groupFilter, spanFil
 		})
 
 		groupMap := make(map[string][]string)
-		for _, span := range spanNames {
+		for j, span := range spanNames {
+			if j > 0 {
+				jsonBuf.WriteString(`,`)
+			}
+			v, _ := json.Marshal(span)
+			jsonBuf.WriteString(fmt.Sprintf(`%s:`, v))
+
 			entries := spans[span]
 			sort.Slice(entries, func(i, j int) bool {
 				return entries[i].time.After(entries[j].time)
@@ -211,12 +229,19 @@ func (t *tracer) ToMap(timezone string, withExactTime bool, groupFilter, spanFil
 			for _, entry := range entries {
 				groupMap[span] = append(groupMap[span], entry.FormattedMessage(timezone, withExactTime))
 			}
+
+			vs, _ := json.Marshal(groupMap[span])
+			jsonBuf.Write(vs)
 		}
+
+		jsonBuf.WriteString(`}`)
 
 		m[group] = groupMap
 	}
 
-	return m
+	jsonBuf.WriteString(`}`)
+
+	return m, jsonBuf.Bytes()
 }
 
 func (t *tracer) Enable() {
