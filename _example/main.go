@@ -3,16 +3,16 @@ package main
 import (
 	"time"
 
-	"github.com/goware/tracelog"
+	"github.com/goware/tracer"
 )
 
 func main() {
-	tracelog := tracelog.NewTracelogWithSizes(2, 2, 4)
-	// tracelog.Enable() // always enabled by default
-	// tracelog.Disable() // disable all logging, turning each call into a noop
+	tracer := tracer.NewTracerWithSizes(2, 2, 4)
+	// tracer.Enable() // always enabled by default
+	// tracer.Disable() // disable all logging, turning each call into a noop
 
 	{
-		group := tracelog.Group("server")
+		group := tracer.Group("server")
 		trace := group.Span("run")
 
 		trace.Info("boot")
@@ -29,7 +29,7 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 
 	{
-		trace := tracelog.Trace("api", "rpc")
+		trace := tracer.Trace("api", "rpc")
 		trace.Info("getUser")
 		trace.Info("getProduct")
 		trace.Info("getArticle")
@@ -38,7 +38,7 @@ func main() {
 
 		time.Sleep(1000 * time.Millisecond)
 
-		trace = tracelog.Trace("api", "db")
+		trace = tracer.Trace("api", "db")
 		trace.Info("getX")
 		trace.Info("getY")
 		trace.Info("setX")
@@ -50,7 +50,7 @@ func main() {
 
 		time.Sleep(1000 * time.Millisecond)
 
-		trace = tracelog.Trace("api", "cache")
+		trace = tracer.Trace("api", "cache")
 		trace.Info("hitA")
 		trace.Info("hitA")
 		trace.Info("hitB")
@@ -61,7 +61,7 @@ func main() {
 
 	// {
 	// 	time.Sleep(1000 * time.Millisecond)
-	// 	trace := tracelog.Trace("probe", "status")
+	// 	trace := tracer.Trace("probe", "status")
 	// 	trace.Info("ok 1")
 	// 	trace.Info("ok 2")
 	// 	trace.Info("ok 3")
@@ -72,7 +72,7 @@ func main() {
 	time.Sleep(1000 * time.Millisecond)
 
 	{
-		trace := tracelog.Trace("jobqueue", "healthcheck")
+		trace := tracer.Trace("jobqueue", "healthcheck")
 		trace.Info("start")
 		trace.Info("check 1")
 		trace.Info("check 2")
@@ -82,10 +82,10 @@ func main() {
 
 	time.Sleep(1000 * time.Millisecond)
 
-	// spew.Dump(tracelog.ListGroups())
-	// spew.Dump(tracelog.Logs("server"))
-	// spew.Dump(tracelog.Logs("api"))
-	// spew.Dump(tracelog.Logs("jobqueue"))
+	// spew.Dump(tracer.ListGroups())
+	// spew.Dump(tracer.Logs("server"))
+	// spew.Dump(tracer.Logs("api"))
+	// spew.Dump(tracer.Logs("jobqueue"))
 	// fmt.Println("\n----\n")
-	// spew.Dump(tracelog.ToMap("EST", false, "", ""))
+	// spew.Dump(tracer.ToMap("EST", false, "", ""))
 }

@@ -1,3 +1,3 @@
-module github.com/goware/tracelog
+module github.com/goware/tracer
 
 go 1.22

@@ -1,4 +1,4 @@
-package tracelog
+package tracer
 
 import (
 	"fmt"
@@ -14,7 +14,7 @@ const (
 	DefaultMessageCount = 60 // total messages per span
 )
 
-type Tracelog interface {
+type Tracer interface {
 	Trace(group, span string) Logger
 	Group(group string) Logger
 
@@ -24,7 +24,7 @@ type Tracelog interface {
 	Logs(group string) [][]LogEntry
 	ToMap(timezone string, withExactTime bool, groupFilter, spanFilter string) map[string]map[string][]string
 
-	Enable()  // by default tracelog is enabled
+	Enable()  // by default tracer is enabled
 	Disable() // disable all logging, turning each call into a noop
 	IsEnabled() bool
 }
@@ -52,7 +52,7 @@ type LogEntry interface {
 	FormattedMessage(timezone string, withExactTime ...bool) string
 }
 
-type tracelog struct {
+type tracer struct {
 	logs                             map[string]map[string][]logEntry
 	numGroups, numSpans, numMessages int
 	enabled                          bool
@@ -61,11 +61,11 @@ type tracelog struct {
 	mu                               sync.RWMutex
 }
 
-func NewTracelog() Tracelog {
-	return NewTracelogWithSizes(DefaultGroupCount, DefaultSpanCount, DefaultMessageCount)
+func NewTracer() Tracer {
+	return NewTracerWithSizes(DefaultGroupCount, DefaultSpanCount, DefaultMessageCount)
 }
 
-func NewTracelogWithSizes(numGroups, numSpans, numMessages int) Tracelog {
+func NewTracerWithSizes(numGroups, numSpans, numMessages int) Tracer {
 	if numGroups < 1 {
 		numGroups = DefaultGroupCount
 	}
@@ -76,7 +76,7 @@ func NewTracelogWithSizes(numGroups, numSpans, numMessages int) Tracelog {
 		numMessages = DefaultMessageCount
 	}
 
-	return &tracelog{
+	return &tracer{
 		logs:        make(map[string]map[string][]logEntry),
 		numGroups:   numGroups,
 		numSpans:    numSpans,
@@ -87,28 +87,28 @@ func NewTracelogWithSizes(numGroups, numSpans, numMessages int) Tracelog {
 	}
 }
 
-func Noop() Tracelog {
-	tracelog := NewTracelogWithSizes(1, 1, 1)
-	tracelog.Disable()
-	return tracelog
+func Noop() Tracer {
+	tracer := NewTracerWithSizes(1, 1, 1)
+	tracer.Disable()
+	return tracer
 }
 
-func (t *tracelog) Trace(group, span string) Logger {
+func (t *tracer) Trace(group, span string) Logger {
 	return &logger{
-		tracelog: t,
-		group:    group,
-		span:     span,
+		tracer: t,
+		group:  group,
+		span:   span,
 	}
 }
 
-func (t *tracelog) Group(group string) Logger {
+func (t *tracer) Group(group string) Logger {
 	return &logger{
-		tracelog: t,
-		group:    group,
+		tracer: t,
+		group:  group,
 	}
 }
 
-func (t *tracelog) ListGroups() []string {
+func (t *tracer) ListGroups() []string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -119,7 +119,7 @@ func (t *tracelog) ListGroups() []string {
 	return groups
 }
 
-func (t *tracelog) ListSpans(group string) []string {
+func (t *tracer) ListSpans(group string) []string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -130,7 +130,7 @@ func (t *tracelog) ListSpans(group string) []string {
 	return spans
 }
 
-func (t *tracelog) Logs(group string) [][]LogEntry {
+func (t *tracer) Logs(group string) [][]LogEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -165,7 +165,7 @@ func (t *tracelog) Logs(group string) [][]LogEntry {
 	return out
 }
 
-func (t *tracelog) ToMap(timezone string, withExactTime bool, groupFilter, spanFilter string) map[string]map[string][]string {
+func (t *tracer) ToMap(timezone string, withExactTime bool, groupFilter, spanFilter string) map[string]map[string][]string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -219,45 +219,45 @@ func (t *tracelog) ToMap(timezone string, withExactTime bool, groupFilter, spanF
 	return m
 }
 
-func (t *tracelog) Enable() {
+func (t *tracer) Enable() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.enabled = true
 }
 
-func (t *tracelog) Disable() {
+func (t *tracer) Disable() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.enabled = false
 }
 
-func (t *tracelog) IsEnabled() bool {
+func (t *tracer) IsEnabled() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.enabled
 }
 
 type logger struct {
-	tracelog *tracelog
-	group    string
-	span     string
+	tracer *tracer
+	group  string
+	span   string
 }
 
 var _ Logger = &logger{}
 
 func (l *logger) Span(span string) Logger {
 	return &logger{
-		tracelog: l.tracelog,
-		group:    l.group,
-		span:     span,
+		tracer: l.tracer,
+		group:  l.group,
+		span:   span,
 	}
 }
 
 func (l *logger) With(group, span string) Logger {
 	return &logger{
-		tracelog: l.tracelog,
-		group:    group,
-		span:     span,
+		tracer: l.tracer,
+		group:  group,
+		span:   span,
 	}
 }
 
@@ -282,62 +282,62 @@ func (l *logger) Error(message string, v ...any) {
 }
 
 func (l *logger) log(level, group, span, message string, v ...any) {
-	if !l.tracelog.IsEnabled() {
+	if !l.tracer.IsEnabled() {
 		return
 	}
 
-	l.tracelog.mu.Lock()
-	defer l.tracelog.mu.Unlock()
+	l.tracer.mu.Lock()
+	defer l.tracer.mu.Unlock()
 
 	timeNow := time.Now().UTC()
 
 	// update timestamps
-	l.tracelog.groupTS[group] = timeNow
-	if l.tracelog.spanTS[group] == nil {
-		l.tracelog.spanTS[group] = make(map[string]time.Time)
+	l.tracer.groupTS[group] = timeNow
+	if l.tracer.spanTS[group] == nil {
+		l.tracer.spanTS[group] = make(map[string]time.Time)
 	}
-	l.tracelog.spanTS[group][span] = timeNow
+	l.tracer.spanTS[group][span] = timeNow
 
 	// add group entry if it doesn't exist, or purge oldest group if we've hit the limit
-	g := l.tracelog.logs[group]
+	g := l.tracer.logs[group]
 	if g == nil {
 		g = make(map[string][]logEntry)
-		l.tracelog.logs[group] = g
-	} else if len(l.tracelog.groupTS) > l.tracelog.numGroups {
+		l.tracer.logs[group] = g
+	} else if len(l.tracer.groupTS) > l.tracer.numGroups {
 		// find and remove the group with the oldest timestamp
 		var oldestGroup string
 		var oldestTime time.Time
 		first := true
-		for grp, ts := range l.tracelog.groupTS {
+		for grp, ts := range l.tracer.groupTS {
 			if first || ts.Before(oldestTime) {
 				oldestGroup = grp
 				oldestTime = ts
 				first = false
 			}
 		}
-		delete(l.tracelog.logs, oldestGroup)
-		delete(l.tracelog.groupTS, oldestGroup)
-		delete(l.tracelog.spanTS, oldestGroup)
+		delete(l.tracer.logs, oldestGroup)
+		delete(l.tracer.groupTS, oldestGroup)
+		delete(l.tracer.spanTS, oldestGroup)
 	}
 
 	// add span entry if it doesn't exist, or purge oldest span if we've hit the limit
 	s := g[span]
 	if s == nil {
-		s = make([]logEntry, 0, l.tracelog.numMessages)
-	} else if len(l.tracelog.spanTS[group]) > l.tracelog.numSpans {
+		s = make([]logEntry, 0, l.tracer.numMessages)
+	} else if len(l.tracer.spanTS[group]) > l.tracer.numSpans {
 		// find and remove the span with the oldest timestamp
 		var oldestSpan string
 		var oldestTime time.Time
 		first := true
-		for span, ts := range l.tracelog.spanTS[group] {
+		for span, ts := range l.tracer.spanTS[group] {
 			if first || ts.Before(oldestTime) {
 				oldestSpan = span
 				oldestTime = ts
 				first = false
 			}
 		}
-		delete(l.tracelog.logs[group], oldestSpan)
-		delete(l.tracelog.spanTS[group], oldestSpan)
+		delete(l.tracer.logs[group], oldestSpan)
+		delete(l.tracer.spanTS[group], oldestSpan)
 	}
 
 	// add log entry
@@ -357,7 +357,7 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 			entry.count++
 			entry.time = timeNow
 			s[i] = entry
-			l.tracelog.logs[group][span] = s
+			l.tracer.logs[group][span] = s
 			return
 		}
 	}
@@ -371,14 +371,14 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 		time:    timeNow,
 		count:   1,
 	}
-	if len(s) < l.tracelog.numMessages {
+	if len(s) < l.tracer.numMessages {
 		s = append(s, newEntry)
 	} else {
 		s = append(s[1:], newEntry)
 	}
 
-	l.tracelog.logs[group] = g
-	l.tracelog.logs[group][span] = s
+	l.tracer.logs[group] = g
+	l.tracer.logs[group][span] = s
 }
 
 type logEntry struct {
