@@ -222,15 +222,20 @@ func (t *tracer) ToMap(timezone string, withExactTime bool, groupFilter, spanFil
 			v, _ := json.Marshal(span)
 			jsonBuf.WriteString(fmt.Sprintf(`%s:`, v))
 
-			entries := spans[span]
-			sort.Slice(entries, func(i, j int) bool {
-				return entries[i].time.After(entries[j].time)
+			originalEntries := spans[span]
+			sortedEntries := make([]logEntry, len(originalEntries))
+			copy(sortedEntries, originalEntries)
+			sort.Slice(sortedEntries, func(i, j int) bool {
+				return sortedEntries[i].time.After(sortedEntries[j].time) // Most recent first
 			})
-			for _, entry := range entries {
-				groupMap[span] = append(groupMap[span], entry.FormattedMessage(timezone, withExactTime))
-			}
 
-			vs, _ := json.Marshal(groupMap[span])
+			formattedEntries := make([]string, 0, len(sortedEntries))
+			for _, entry := range sortedEntries {
+				formattedEntries = append(formattedEntries, entry.FormattedMessage(timezone, withExactTime))
+			}
+			groupMap[span] = formattedEntries
+
+			vs, _ := json.Marshal(formattedEntries)
 			jsonBuf.Write(vs)
 		}
 
@@ -316,94 +321,107 @@ func (l *logger) log(level, group, span, message string, v ...any) {
 
 	timeNow := time.Now().UTC()
 
-	// update timestamps
-	l.tracer.groupTS[group] = timeNow
-	if l.tracer.spanTS[group] == nil {
+	// Ensure group exists and handle group limit
+	if _, ok := l.tracer.logs[group]; !ok {
+		if len(l.tracer.groupTS) >= l.tracer.numGroups && l.tracer.numGroups > 0 {
+			// Find and remove the oldest group
+			var oldestGroup string
+			var oldestTime time.Time
+			first := true
+			for grp, ts := range l.tracer.groupTS {
+				if first || ts.Before(oldestTime) {
+					oldestGroup = grp
+					oldestTime = ts
+					first = false
+				}
+			}
+			if oldestGroup != "" { // Ensure we found one
+				delete(l.tracer.logs, oldestGroup)
+				delete(l.tracer.groupTS, oldestGroup)
+				delete(l.tracer.spanTS, oldestGroup)
+			}
+		}
+		// Create the new group structures
+		l.tracer.logs[group] = make(map[string][]logEntry)
 		l.tracer.spanTS[group] = make(map[string]time.Time)
 	}
+	// Update group timestamp regardless of whether it was new or existing
+	l.tracer.groupTS[group] = timeNow
+
+	// Ensure span exists and handle span limit
+	_, spanExists := l.tracer.logs[group][span]
+	if !spanExists {
+		if len(l.tracer.spanTS[group]) >= l.tracer.numSpans && l.tracer.numSpans > 0 {
+			// Find and remove the oldest span in this group
+			var oldestSpan string
+			var oldestTime time.Time
+			first := true
+			for sp, ts := range l.tracer.spanTS[group] {
+				if first || ts.Before(oldestTime) {
+					oldestSpan = sp
+					oldestTime = ts
+					first = false
+				}
+			}
+			if oldestSpan != "" { // Ensure we found one
+				delete(l.tracer.logs[group], oldestSpan)
+				delete(l.tracer.spanTS[group], oldestSpan)
+			}
+		}
+		// Create the new span slice (it will be populated later)
+		// Ensure the map entry exists even if the slice is initially empty
+		l.tracer.logs[group][span] = make([]logEntry, 0, l.tracer.numMessages)
+	}
+	// Update span timestamp regardless of whether it was new or existing
 	l.tracer.spanTS[group][span] = timeNow
 
-	// add group entry if it doesn't exist, or purge oldest group if we've hit the limit
-	g := l.tracer.logs[group]
-	if g == nil {
-		g = make(map[string][]logEntry)
-		l.tracer.logs[group] = g
-	} else if len(l.tracer.groupTS) > l.tracer.numGroups {
-		// find and remove the group with the oldest timestamp
-		var oldestGroup string
-		var oldestTime time.Time
-		first := true
-		for grp, ts := range l.tracer.groupTS {
-			if first || ts.Before(oldestTime) {
-				oldestGroup = grp
-				oldestTime = ts
-				first = false
-			}
-		}
-		delete(l.tracer.logs, oldestGroup)
-		delete(l.tracer.groupTS, oldestGroup)
-		delete(l.tracer.spanTS, oldestGroup)
-	}
+	// Log entry handling
+	s := l.tracer.logs[group][span] // Get the (potentially new) span slice
 
-	// add span entry if it doesn't exist, or purge oldest span if we've hit the limit
-	s := g[span]
-	if s == nil {
-		s = make([]logEntry, 0, l.tracer.numMessages)
-	} else if len(l.tracer.spanTS[group]) > l.tracer.numSpans {
-		// find and remove the span with the oldest timestamp
-		var oldestSpan string
-		var oldestTime time.Time
-		first := true
-		for span, ts := range l.tracer.spanTS[group] {
-			if first || ts.Before(oldestTime) {
-				oldestSpan = span
-				oldestTime = ts
-				first = false
-			}
-		}
-		delete(l.tracer.logs[group], oldestSpan)
-		delete(l.tracer.spanTS[group], oldestSpan)
-	}
-
-	// add log entry
+	// Format message and apply length limit
 	msg := fmt.Sprintf(message, v...)
 	if len(msg) == 0 {
-		return
+		return // Don't log empty messages
 	}
-	if len(msg) > 1000 {
-		// truncate message to 1000 characters
-		msg = msg[:1000]
+	const maxMsgLen = 1000
+	if len(msg) > maxMsgLen {
+		msg = msg[:maxMsgLen] // truncate
 	}
 
-	// first check if the message is already in the log, and if so, increment the count
-	// and update the time
-	for i, entry := range s {
-		if entry.message == msg && entry.level == level {
-			entry.count++
-			entry.time = timeNow
-			s[i] = entry
+	// Check for duplicate message to increment count instead of adding new entry
+	found := false
+	for i := range s {
+		// Check level as well to differentiate INFO/WARN/ERROR of same message
+		if s[i].message == msg && s[i].level == level {
+			s[i].count++
+			s[i].time = timeNow
 			l.tracer.logs[group][span] = s
-			return
+			found = true
+			break
 		}
 	}
 
-	// add entry with capacity
-	newEntry := logEntry{
-		group:   l.group,
-		span:    l.span,
-		message: msg,
-		level:   level,
-		time:    timeNow,
-		count:   1,
+	// If it wasn't a duplicate, add a new entry
+	if !found {
+		newEntry := logEntry{
+			group:   l.group,
+			span:    l.span,
+			message: msg,
+			level:   level,
+			time:    timeNow,
+			count:   1,
+		}
+		// Handle message limit using FIFO eviction
+		if len(s) < l.tracer.numMessages {
+			s = append(s, newEntry)
+		} else if l.tracer.numMessages > 0 {
+			s = append(s[1:], newEntry)
+		} else {
+			// If numMessages is 0, effectively disable message logging for this span
+			s = []logEntry{}
+		}
+		l.tracer.logs[group][span] = s
 	}
-	if len(s) < l.tracer.numMessages {
-		s = append(s, newEntry)
-	} else {
-		s = append(s[1:], newEntry)
-	}
-
-	l.tracer.logs[group] = g
-	l.tracer.logs[group][span] = s
 }
 
 type logEntry struct {
